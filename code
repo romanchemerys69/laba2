@@ -1,0 +1,127 @@
+#include <iostream>
+#include <vector>
+#include <thread>
+#include <future>
+#include <random>
+#include <chrono>
+#include <iomanip>
+#include <cmath>
+#include <algorithm>
+#include <execution>
+
+using namespace std;
+using namespace chrono;
+
+// --- 1. Генерація випадкових даних ---
+vector<long long> generate_data(size_t N, long long min_val = -1'000'000, long long max_val = 1'000'000) {
+    mt19937_64 gen(random_device{}());
+    uniform_int_distribution<long long> dist(min_val, max_val);
+
+    vector<long long> v(N);
+    for (auto& x : v) x = dist(gen);
+    return v;
+}
+
+// --- 2. Послідовна реалізація ---
+long long max_diff_seq(const vector<long long>& data) {
+    long long maxd = 0;
+    for (size_t i = 1; i < data.size(); ++i)
+        maxd = max(maxd, llabs(data[i] - data[i - 1]));
+    return maxd;
+}
+
+// --- 3. Бібліотечна реалізація (без політики і з політиками) ---
+template <typename ExecPolicy>
+long long max_diff_lib(const vector<long long>& data, ExecPolicy&& policy) {
+    if (data.size() < 2) return 0;
+    vector<long long> diffs(data.size() - 1);
+    transform(policy, data.begin() + 1, data.end(), data.begin(), diffs.begin(),
+        [](long long a, long long b) { return llabs(a - b); });
+    return *max_element(policy, diffs.begin(), diffs.end());
+}
+
+// --- 4. Власний паралельний алгоритм ---
+long long max_diff_parallel(const vector<long long>& data, int K) {
+    size_t N = data.size();
+    if (N < 2 || K < 1) return 0;
+
+    vector<future<long long>> futures;
+    size_t chunk = N / K;
+
+    for (int i = 0; i < K; ++i) {
+        size_t start = i * chunk;
+        size_t end = (i == K - 1) ? N : (i + 1) * chunk + 1;
+
+        futures.push_back(async(launch::async, [&, start, end] {
+            long long local_max = 0;
+            for (size_t j = start + 1; j < end && j < N; ++j)
+                local_max = max(local_max, llabs(data[j] - data[j - 1]));
+            return local_max;
+            }));
+    }
+
+    long long global_max = 0;
+    for (auto& f : futures) global_max = max(global_max, f.get());
+    return global_max;
+}
+
+// --- 5. Вимір часу ---
+double measure_time(function<void()> f) {
+    auto t1 = high_resolution_clock::now();
+    f();
+    auto t2 = high_resolution_clock::now();
+    return duration<double, milli>(t2 - t1).count();
+}
+
+// --- 6. Експеримент ---
+void run_experiment(const vector<long long>& data) {
+    cout << "Array size: " << data.size() << "\n";
+
+    // Послідовний варіант
+    long long result_seq = 0;
+    double t_seq = measure_time([&] { result_seq = max_diff_seq(data); });
+    cout << "Sequential: " << fixed << setprecision(3) << t_seq << " ms, max_diff=" << result_seq << "\n";
+
+    // Бібліотечні варіанти
+    long long r1 = 0, r2 = 0, r3 = 0;
+    double t1 = measure_time([&] { r1 = max_diff_lib(data, execution::seq); });
+    double t2 = measure_time([&] { r2 = max_diff_lib(data, execution::par); });
+    double t3 = measure_time([&] { r3 = max_diff_lib(data, execution::par_unseq); });
+
+    cout << "Library (seq):        " << t1 << " ms\n";
+    cout << "Library (par):        " << t2 << " ms\n";
+    cout << "Library (par_unseq):  " << t3 << " ms\n";
+
+    // Власний паралельний алгоритм
+    unsigned int H = thread::hardware_concurrency();
+    if (H == 0) H = 4;
+    cout << "Hardware threads: " << H << "\n";
+    cout << "K\tTime(ms)\tSpeedup\n";
+
+    double best_time = t_seq;
+    int best_K = 1;
+
+    for (int K = 1; K <= (int)H * 2; ++K) {
+        long long res = 0;
+        double t = measure_time([&] { res = max_diff_parallel(data, K); });
+        double speedup = t_seq / t;
+        cout << K << "\t" << t << "\t" << speedup << "\n";
+        if (t < best_time) { best_time = t; best_K = K; }
+    }
+
+    cout << "Best K=" << best_K << ", time=" << best_time << " ms, ratio=" << best_K << "/" << H << "\n";
+    cout << "-------------------------------------------\n\n";
+}
+
+// --- 7. main ---
+int main() {
+    ios::sync_with_stdio(false);
+
+    vector<size_t> sizes = { 1'000'000, 5'000'000 };
+    for (auto N : sizes) {
+        auto data = generate_data(N);
+        run_experiment(data);
+    }
+
+    return 0;
+}
